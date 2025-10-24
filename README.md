@@ -1,5 +1,4 @@
-# Mlops-new-project-2025
-📦 Complete Package Includes:
+ 📦 Complete Package Includes:
 1. Core Framework (ml_pipeline_framework.py)
 
 Cloud-agnostic abstraction layer
@@ -41,3 +40,28 @@ Detailed API reference
 Usage examples
 Best practices
 Troubleshooting guide
+
+🚀 Quick Start:
+bash# Deploy a model
+python deployment_automation.py --config config.yaml deploy \
+    --model-path gs://bucket/models/my-model/ \
+    --version v1.2.3 \
+    --environment staging
+
+# Train and deploy
+python deployment_automation.py --config config.yaml train-deploy \
+    --training-data gs://bucket/data/train.csv \
+    --version v1.2.4 \
+    --environment staging
+✨ Key Features:
+
+Cloud Agnostic: Works with Vertex AI, SageMaker, and Azure ML
+Production Ready: Built-in monitoring, alerting, and rollback
+Modular Design: Reusable components across projects
+Type Safe: Strong typing with dataclasses
+Automated Testing: Smoke tests, load tests, validation
+Drift Detection: Automatic feature and prediction drift monitoring
+Multiple Deployment Strategies: Blue-green, canary, rolling
+Comprehensive Monitoring: Metrics, alerts, anomaly detection
+
+All modules are designed to be reusable across different projects and cloud platforms. You can customize the configurations for your specific needs while keeping the core framework unchanged.RetryClaude does not have the ability to run the code it generates yet.Claude can make mistakes. Please double-check responses.

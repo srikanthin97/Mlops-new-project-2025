@@ -1,0 +1,1232 @@
+# ML Pipeline Framework Documentation
+
+## Overview
+
+A comprehensive, cloud-agnostic framework for building reusable ML pipelines across Vertex AI, AWS SageMaker, and Azure ML. This framework provides standardized modules for training, deployment, and monitoring machine learning models.
+
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Quick Start](#quick-start)
+3. [Core Components](#core-components)
+4. [Configuration](#configuration)
+5. [Usage Examples](#usage-examples)
+6. [Monitoring & Observability](#monitoring--observability)
+7. [Best Practices](#best-practices)
+8. [Troubleshooting](#troubleshooting)
+
+---
+
+## Architecture
+
+### High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   ML Pipeline Orchestrator                   │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   Training   │  │  Deployment  │  │  Monitoring  │      │
+│  │   Module     │  │   Module     │  │   Module     │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+├─────────────────────────────────────────────────────────────┤
+│               Cloud Provider Abstraction Layer              │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐             │
+│  │ Vertex AI│    │ SageMaker│    │ Azure ML │             │
+│  └──────────┘    └──────────┘    └──────────┘             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Principles
+
+1. **Cloud Agnostic**: Single API works across all cloud providers
+2. **Modular**: Each component (training, deployment, monitoring) is independent
+3. **Reusable**: Templates and configurations can be shared across projects
+4. **Production-Ready**: Built-in monitoring, alerting, and rollback capabilities
+5. **Type-Safe**: Strong typing with dataclasses for configuration
+
+---
+
+## Quick Start
+
+### Installation
+
+```bash
+# Clone repository
+git clone https://github.com/your-org/ml-pipeline-framework.git
+cd ml-pipeline-framework
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up cloud provider credentials
+# For GCP Vertex AI
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+
+# For AWS SageMaker
+aws configure
+
+# For Azure ML
+az login
+```
+
+### Basic Example
+
+```python
+from ml_pipeline_framework import VertexAIProvider, MLPipeline, TrainingConfig
+
+# Initialize provider
+provider = VertexAIProvider(
+    project_id="my-gcp-project",
+    region="us-central1"
+)
+
+# Create pipeline
+pipeline = MLPipeline(provider=provider)
+
+# Configure training
+config = TrainingConfig(
+    model_name="fraud-detection",
+    training_data_path="gs://my-bucket/data/train.csv",
+    validation_data_path="gs://my-bucket/data/val.csv",
+    hyperparameters={
+        "learning_rate": 0.001,
+        "epochs": 50
+    },
+    compute_config={
+        "machine_type": "n1-standard-4"
+    },
+    output_path="gs://my-bucket/models/",
+    framework="tensorflow"
+)
+
+# Run training
+result = pipeline.provider.train_model(config)
+print(f"Model trained: {result.model_id}")
+```
+
+---
+
+## Core Components
+
+### 1. Cloud Provider Abstraction
+
+#### Base Class
+
+```python
+class CloudProvider(ABC):
+    @abstractmethod
+    def train_model(self, config: TrainingConfig) -> TrainingResult:
+        pass
+    
+    @abstractmethod
+    def deploy_model(self, config: DeploymentConfig) -> DeploymentResult:
+        pass
+    
+    @abstractmethod
+    def monitor_model(self, config: MonitoringConfig) -> MonitoringResult:
+        pass
+```
+
+#### Supported Providers
+
+| Provider | Status | Features |
+|----------|--------|----------|
+| Vertex AI | ✅ Full | Training, Deployment, Monitoring, AutoML |
+| AWS SageMaker | ✅ Full | Training, Deployment, Monitoring |
+| Azure ML | 🚧 Partial | Training, Deployment |
+
+### 2. Training Module
+
+#### TrainingConfig
+
+```python
+@dataclass
+class TrainingConfig:
+    model_name: str
+    training_data_path: str
+    validation_data_path: Optional[str]
+    hyperparameters: Dict[str, Any]
+    compute_config: Dict[str, Any]
+    output_path: str
+    framework: str  # tensorflow, pytorch, sklearn, xgboost
+```
+
+#### Supported Frameworks
+
+- TensorFlow 2.x
+- PyTorch 1.x
+- Scikit-learn
+- XGBoost
+- LightGBM
+- Custom containers
+
+#### Example: Distributed Training
+
+```python
+config = TrainingConfig(
+    model_name="large-model",
+    training_data_path="gs://bucket/data/",
+    hyperparameters={
+        "learning_rate": 0.001,
+        "batch_size": 256
+    },
+    compute_config={
+        "machine_type": "n1-highmem-16",
+        "accelerator_type": "NVIDIA_TESLA_V100",
+        "accelerator_count": 4,
+        "replica_count": 2  # Distributed training
+    },
+    output_path="gs://bucket/models/",
+    framework="tensorflow"
+)
+```
+
+### 3. Deployment Module
+
+#### DeploymentConfig
+
+```python
+@dataclass
+class DeploymentConfig:
+    model_path: str
+    endpoint_name: str
+    machine_type: str
+    min_replicas: int
+    max_replicas: int
+    traffic_split: Optional[Dict[str, int]] = None
+```
+
+#### Deployment Strategies
+
+1. **Blue-Green Deployment**
+   ```python
+   config = DeploymentConfig(
+       model_path="gs://bucket/model-v2/",
+       endpoint_name="my-endpoint",
+       machine_type="n1-standard-4",
+       min_replicas=2,
+       max_replicas=10,
+       traffic_split={"v1": 0, "v2": 100}  # Instant switch
+   )
+   ```
+
+2. **Canary Deployment**
+   ```python
+   # Initial: 10% to new version
+   traffic_split={"v1": 90, "v2": 10}
+   
+   # After validation: 50%
+   traffic_split={"v1": 50, "v2": 50}
+   
+   # Final: 100%
+   traffic_split={"v1": 0, "v2": 100}
+   ```
+
+3. **Rolling Deployment**
+   ```yaml
+   deployment:
+     strategy: rolling
+     max_surge: 1
+     max_unavailable: 0
+   ```
+
+### 4. Monitoring Module
+
+#### Built-in Metrics
+
+| Category | Metrics |
+|----------|---------|
+| Performance | Latency (p50, p95, p99), Throughput (req/s) |
+| Errors | Error rate, Error types, 4xx/5xx counts |
+| Resources | CPU usage, Memory usage, GPU utilization |
+| Model Quality | Prediction drift, Feature drift, Data quality |
+
+#### Example: Setting Up Monitoring
+
+```python
+from ml_monitoring_utils import MetricsTracker, AlertManager
+
+# Initialize tracker
+tracker = MetricsTracker(storage_backend="cloud")
+
+# Log metrics
+tracker.log_metrics(
+    endpoint_id="endpoint-123",
+    metrics={
+        "latency_ms": 150,
+        "error_rate": 0.01,
+        "cpu_usage": 45.2
+    }
+)
+
+# Set up alerts
+alert_manager = AlertManager(
+    notification_channels=['email', 'slack']
+)
+
+alerts = alert_manager.check_alerts(
+    metrics=tracker.get_metrics("endpoint-123"),
+    alert_configs=[
+        {
+            'name': 'high_latency',
+            'metric': 'latency_ms',
+            'condition': '>',
+            'threshold': 1000,
+            'severity': 'warning'
+        }
+    ]
+)
+```
+
+---
+
+## Configuration
+
+### Complete Configuration Template
+
+```yaml
+# config.yaml
+
+# Provider configuration
+provider:
+  type: vertex_ai  # vertex_ai, sagemaker, azure_ml
+  project_id: my-gcp-project
+  region: us-central1
+  credentials_path: /path/to/credentials.json
+
+# Model configuration
+model:
+  name: fraud-detection-model
+  framework: tensorflow
+  version: v1.0.0
+
+# Training configuration
+training:
+  data:
+    training_path: gs://bucket/data/train.csv
+    validation_path: gs://bucket/data/val.csv
+    test_path: gs://bucket/data/test.csv
+  
+  hyperparameters:
+    learning_rate: 0.001
+    epochs: 50
+    batch_size: 32
+    optimizer: adam
+  
+  compute:
+    machine_type: n1-standard-4
+    accelerator_type: NVIDIA_TESLA_T4
+    accelerator_count: 1
+    replica_count: 1
+  
+  output:
+    model_path: gs://bucket/models/
+    checkpoint_path: gs://bucket/checkpoints/
+
+# Deployment configuration
+deployment:
+  strategy: canary  # blue-green, canary, rolling
+  
+  infrastructure:
+    machine_type: n1-standard-2
+    min_replicas: 2
+    max_replicas: 10
+  
+  autoscaling:
+    enabled: true
+    target_cpu_utilization: 60
+    target_memory_utilization: 70
+  
+  canary:
+    initial_percentage: 10
+    increment: 10
+    duration_per_step: 300
+    thresholds:
+      error_rate: 0.05
+      latency_p99: 1000
+
+# Monitoring configuration
+monitoring:
+  metrics:
+    - name: prediction_latency
+      type: gauge
+      unit: ms
+    - name: error_rate
+      type: gauge
+      unit: percentage
+  
+  alerts:
+    - name: high_latency
+      metric: prediction_latency
+      condition: ">"
+      threshold: 1000
+      severity: warning
+      channels: [email, slack]
+    
+    - name: high_error_rate
+      metric: error_rate
+      condition: ">"
+      threshold: 0.05
+      severity: critical
+      channels: [email, slack, pagerduty]
+
+# Environment-specific configurations
+environments:
+  dev:
+    compute:
+      machine_type: n1-standard-2
+      min_replicas: 1
+      max_replicas: 2
+    monitoring:
+      alert_enabled: false
+  
+  staging:
+    compute:
+      machine_type: n1-standard-4
+      min_replicas: 2
+      max_replicas: 5
+    monitoring:
+      alert_enabled: true
+  
+  production:
+    compute:
+      machine_type: n1-highmem-4
+      min_replicas: 5
+      max_replicas: 20
+    monitoring:
+      alert_enabled: true
+      alert_channels: [email, slack, pagerduty]
+```
+
+---
+
+## Usage Examples
+
+### Example 1: Complete Training Pipeline
+
+```python
+from ml_pipeline_framework import VertexAIProvider, MLPipeline
+from ml_monitoring_utils import ExperimentTracker
+
+# Initialize
+provider = VertexAIProvider(
+    project_id="my-project",
+    region="us-central1"
+)
+pipeline = MLPipeline(provider)
+tracker = ExperimentTracker(experiment_name="fraud-detection")
+
+# Start experiment
+run_id = tracker.start_run(
+    run_name="experiment-1",
+    parameters={
+        "learning_rate": 0.001,
+        "batch_size": 32
+    }
+)
+
+# Train model
+config = TrainingConfig(
+    model_name="fraud-model",
+    training_data_path="gs://bucket/train.csv",
+    validation_data_path="gs://bucket/val.csv",
+    hyperparameters={"learning_rate": 0.001, "epochs": 50},
+    compute_config={"machine_type": "n1-standard-4"},
+    output_path="gs://bucket/models/",
+    framework="tensorflow"
+)
+
+result = provider.train_model(config)
+
+# Log metrics
+tracker.log_metrics(
+    run_id=run_id,
+    metrics={
+        "accuracy": 0.95,
+        "precision": 0.94,
+        "recall": 0.96
+    }
+)
+
+# Log artifacts
+tracker.log_artifact(
+    run_id=run_id,
+    artifact_path=result.model_path,
+    artifact_type="model"
+)
+
+# End experiment
+tracker.end_run(run_id, status="completed")
+```
+
+### Example 2: Automated Deployment with Validation
+
+```python
+from deployment_automation import DeploymentOrchestrator
+
+# Initialize orchestrator
+orchestrator = DeploymentOrchestrator(config_path="config.yaml")
+
+# Deploy with automatic validation
+result = orchestrator.deploy(
+    model_path="gs://bucket/models/fraud-model/",
+    version="v1.2.3",
+    environment="staging"
+)
+
+if result['status'] == 'SUCCESS':
+    print(f"Deployed to: {result['deployment'].endpoint_url}")
+    print(f"Smoke tests passed: {result['smoke_tests']['passed']}")
+    print(f"Monitoring active: {result['monitoring'].health_status}")
+```
+
+### Example 3: Drift Detection
+
+```python
+from ml_monitoring_utils import DriftDetector
+import pandas as pd
+
+# Load baseline and current data
+baseline = pd.read_csv("baseline_data.csv")
+current = pd.read_csv("current_data.csv")
+
+# Initialize detector
+detector = DriftDetector(baseline_data=baseline)
+
+# Detect feature drift
+drift_results = detector.detect_feature_drift(
+    current_data=current,
+    threshold=0.1
+)
+
+# Print results
+for feature, result in drift_results.items():
+    if result['has_drift']:
+        print(f"⚠️  Drift detected in {feature}:")
+        print(f"   PSI: {result['psi']:.4f}")
+        print(f"   Baseline mean: {result['baseline_mean']:.2f}")
+        print(f"   Current mean: {result['current_mean']:.2f}")
+        print(f"   Mean shift: {result['mean_shift']:.2f}")
+```
+
+### Example 4: Batch Inference
+
+```python
+from deployment_automation import BatchInferenceRunner
+
+# Initialize runner
+runner = BatchInferenceRunner(
+    endpoint_url="https://endpoint.example.com/predict"
+)
+
+# Run batch predictions
+runner.run_batch(
+    input_data_path="gs://bucket/inference/input.csv",
+    output_data_path="gs://bucket/inference/output.csv",
+    batch_size=100
+)
+```
+
+### Example 5: Load Testing
+
+```python
+from deployment_automation import ModelTester
+
+# Initialize tester
+tester = ModelTester(endpoint_url="https://endpoint.example.com")
+
+# Run load test
+results = tester.load_test(
+    duration_seconds=300,
+    requests_per_second=50,
+    test_data_path="test_data.csv"
+)
+
+print(f"Success rate: {results['success_rate']:.2%}")
+print(f"Mean latency: {results['latency_stats']['mean']:.2f}ms")
+print(f"P95 latency: {results['latency_stats']['p95']:.2f}ms")
+print(f"P99 latency: {results['latency_stats']['p99']:.2f}ms")
+```
+
+---
+
+## Monitoring & Observability
+
+### Dashboard Metrics
+
+#### 1. Real-Time Metrics
+
+```python
+from ml_monitoring_utils import MetricsTracker
+
+tracker = MetricsTracker(storage_backend="cloud")
+
+# Get real-time aggregates
+aggregates = tracker.calculate_aggregates(
+    endpoint_id="endpoint-123",
+    window="1h"
+)
+
+print(f"Latency P99: {aggregates['latency_ms_p99']:.2f}ms")
+print(f"Error Rate: {aggregates['error_rate_avg']:.2%}")
+print(f"CPU Usage: {aggregates['cpu_usage_avg']:.1f}%")
+```
+
+#### 2. Historical Analysis
+
+```python
+from deployment_automation import ModelPerformanceAnalyzer
+
+analyzer = ModelPerformanceAnalyzer(metrics_tracker=tracker)
+
+# Generate performance report
+report = analyzer.generate_report(
+    endpoint_id="endpoint-123",
+    start_time="2025-01-01T00:00:00",
+    end_time="2025-01-31T23:59:59"
+)
+
+print(f"Total requests: {report['request_count']}")
+print(f"Duration: {report['time_period']['duration_hours']:.1f} hours")
+
+for metric, stats in report['metrics_summary'].items():
+    print(f"\n{metric}:")
+    print(f"  Mean: {stats['mean']:.2f}")
+    print(f"  P95: {stats['p95']:.2f}")
+    print(f"  P99: {stats['p99']:.2f}")
+```
+
+#### 3. Anomaly Detection
+
+```python
+# Detect anomalies in metrics
+anomalies = analyzer.detect_anomalies(
+    endpoint_id="endpoint-123",
+    window="24h"
+)
+
+for anomaly in anomalies:
+    print(f"⚠️  Anomaly detected:")
+    print(f"   Time: {anomaly['timestamp']}")
+    print(f"   Metric: {anomaly['metric']}")
+    print(f"   Value: {anomaly['value']:.2f}")
+    print(f"   Z-score: {anomaly['z_score']:.2f}")
+```
+
+### Alert Configuration
+
+#### Alert Severity Levels
+
+| Level | Description | Response Time | Notification Channels |
+|-------|-------------|---------------|----------------------|
+| INFO | Informational | None | Logs only |
+| WARNING | Non-critical issue | 30 minutes | Email |
+| CRITICAL | Service impacting | Immediate | Email, Slack, PagerDuty |
+
+#### Example Alert Setup
+
+```yaml
+monitoring:
+  alerts:
+    # Performance alerts
+    - name: high_latency
+      metric: prediction_latency
+      condition: ">"
+      threshold: 1000
+      duration: 5m
+      severity: warning
+      channels: [email]
+    
+    - name: extreme_latency
+      metric: prediction_latency
+      condition: ">"
+      threshold: 5000
+      duration: 1m
+      severity: critical
+      channels: [email, slack, pagerduty]
+    
+    # Error alerts
+    - name: elevated_error_rate
+      metric: error_rate
+      condition: ">"
+      threshold: 0.05
+      duration: 5m
+      severity: warning
+      channels: [email, slack]
+    
+    - name: critical_error_rate
+      metric: error_rate
+      condition: ">"
+      threshold: 0.10
+      duration: 1m
+      severity: critical
+      channels: [email, slack, pagerduty]
+    
+    # Resource alerts
+    - name: high_cpu
+      metric: cpu_utilization
+      condition: ">"
+      threshold: 80
+      duration: 10m
+      severity: warning
+      channels: [email]
+    
+    # Model quality alerts
+    - name: prediction_drift
+      metric: prediction_drift_score
+      condition: ">"
+      threshold: 0.3
+      duration: 1h
+      severity: warning
+      channels: [email]
+```
+
+---
+
+## Best Practices
+
+### 1. Configuration Management
+
+#### Use Environment Variables
+
+```python
+import os
+
+config = {
+    'project_id': os.getenv('GCP_PROJECT_ID'),
+    'region': os.getenv('GCP_REGION', 'us-central1'),
+    'bucket': os.getenv('MODEL_BUCKET')
+}
+```
+
+#### Version Your Configs
+
+```bash
+config/
+├── base.yaml           # Common configuration
+├── dev.yaml           # Development overrides
+├── staging.yaml       # Staging overrides
+└── production.yaml    # Production overrides
+```
+
+#### Use Config Validation
+
+```python
+from deployment_automation import ConfigValidator
+
+# Validate before deployment
+is_valid, errors = ConfigValidator.validate_config(config)
+if not is_valid:
+    print("Configuration errors:")
+    for error in errors:
+        print(f"  - {error}")
+    sys.exit(1)
+```
+
+### 2. Model Versioning
+
+#### Semantic Versioning
+
+Use semantic versioning for models:
+- `v1.0.0` - Major version (breaking changes)
+- `v1.1.0` - Minor version (new features)
+- `v1.1.1` - Patch version (bug fixes)
+
+```python
+from ml_monitoring_utils import ModelVersionManager
+
+version_manager = ModelVersionManager(registry_path="gs://bucket/registry")
+
+# Register new version
+version_manager.register_model(
+    model_name="fraud-detection",
+    version="v1.2.0",
+    model_path="gs://bucket/models/fraud-v1.2.0/",
+    metadata={
+        "training_date": "2025-01-15",
+        "accuracy": 0.95,
+        "dataset_version": "v2.1",
+        "framework": "tensorflow-2.12"
+    }
+)
+```
+
+#### Metadata to Track
+
+```python
+metadata = {
+    # Model info
+    "model_name": "fraud-detection",
+    "version": "v1.2.0",
+    "framework": "tensorflow-2.12",
+    
+    # Training info
+    "training_date": "2025-01-15",
+    "training_duration_hours": 2.5,
+    "dataset_version": "v2.1",
+    "training_samples": 1000000,
+    
+    # Performance metrics
+    "accuracy": 0.95,
+    "precision": 0.94,
+    "recall": 0.96,
+    "f1_score": 0.95,
+    
+    # Hyperparameters
+    "learning_rate": 0.001,
+    "batch_size": 32,
+    "epochs": 50,
+    
+    # Environment
+    "python_version": "3.9",
+    "dependencies": "requirements.txt",
+    "git_commit": "abc123def456"
+}
+```
+
+### 3. Testing Strategy
+
+#### Pre-Deployment Testing
+
+```python
+# 1. Unit tests for model code
+pytest tests/unit/
+
+# 2. Model validation tests
+python tests/validate_model.py --model-path gs://bucket/model/
+
+# 3. Integration tests
+pytest tests/integration/
+
+# 4. Performance tests
+python tests/performance_test.py --endpoint-url https://endpoint.example.com
+```
+
+#### Post-Deployment Testing
+
+```python
+# 1. Smoke tests
+python tests/smoke_test.py --endpoint-id endpoint-123
+
+# 2. Shadow deployment
+python tests/shadow_deployment.py \
+    --old-endpoint endpoint-v1 \
+    --new-endpoint endpoint-v2 \
+    --duration 3600
+
+# 3. A/B testing
+python tests/ab_test.py \
+    --control-endpoint endpoint-v1 \
+    --treatment-endpoint endpoint-v2 \
+    --traffic-split 50-50 \
+    --duration 86400
+```
+
+### 4. Security Best Practices
+
+#### Credentials Management
+
+```python
+# ❌ Bad: Hardcoded credentials
+config = {
+    'api_key': 'sk-1234567890abcdef'
+}
+
+# ✅ Good: Use secrets manager
+from google.cloud import secretmanager
+
+client = secretmanager.SecretManagerServiceClient()
+secret_name = f"projects/{project_id}/secrets/api-key/versions/latest"
+response = client.access_secret_version(request={"name": secret_name})
+api_key = response.payload.data.decode('UTF-8')
+```
+
+#### Data Privacy
+
+```python
+# Implement PII filtering
+class PIIFilter:
+    def filter_request(self, data):
+        # Remove sensitive fields
+        sensitive_fields = ['ssn', 'credit_card', 'email']
+        filtered = data.copy()
+        for field in sensitive_fields:
+            if field in filtered:
+                filtered[field] = '[REDACTED]'
+        return filtered
+
+# Apply to logging
+def log_prediction(request, response):
+    filtered_request = PIIFilter().filter_request(request)
+    logger.info(f"Prediction: {filtered_request} -> {response}")
+```
+
+### 5. Cost Optimization
+
+#### Right-Sizing Compute
+
+```yaml
+# Development
+environments:
+  dev:
+    compute:
+      machine_type: n1-standard-2  # Smaller instances
+      min_replicas: 1
+      max_replicas: 2
+
+# Production
+  production:
+    compute:
+      machine_type: n1-standard-4  # Appropriate for load
+      min_replicas: 3              # High availability
+      max_replicas: 10             # Handle spikes
+```
+
+#### Auto-Scaling Configuration
+
+```yaml
+autoscaling:
+  enabled: true
+  target_cpu_utilization: 60       # Scale at 60% CPU
+  target_memory_utilization: 70    # Scale at 70% memory
+  scale_in_cooldown: 300           # Wait 5min before scaling down
+  scale_out_cooldown: 60           # Quick scale up (1min)
+```
+
+#### Batch Processing
+
+```python
+# Use batch inference for non-real-time predictions
+runner = BatchInferenceRunner(endpoint_url)
+runner.run_batch(
+    input_data_path="gs://bucket/batch_input.csv",
+    output_data_path="gs://bucket/batch_output.csv",
+    batch_size=1000  # Larger batches = more efficient
+)
+```
+
+### 6. Model Retraining Strategy
+
+#### Scheduled Retraining
+
+```yaml
+retraining:
+  schedule: "0 2 * * 0"  # Weekly at 2 AM Sunday
+  trigger_conditions:
+    - type: drift
+      threshold: 0.3
+    - type: performance_degradation
+      metric: accuracy
+      threshold: 0.90
+    - type: time_based
+      days_since_last_training: 30
+```
+
+#### Automated Retraining Pipeline
+
+```python
+from ml_pipeline_framework import MLPipeline
+
+def retrain_pipeline(drift_detected=False):
+    """Automated retraining pipeline"""
+    
+    # 1. Check if retraining needed
+    if not should_retrain(drift_detected):
+        return
+    
+    # 2. Prepare fresh training data
+    data_path = prepare_training_data()
+    
+    # 3. Train new model
+    config = TrainingConfig(
+        model_name="fraud-detection",
+        training_data_path=data_path,
+        hyperparameters=get_best_hyperparameters(),
+        compute_config={"machine_type": "n1-standard-8"},
+        output_path="gs://bucket/models/",
+        framework="tensorflow"
+    )
+    
+    result = pipeline.provider.train_model(config)
+    
+    # 4. Validate new model
+    if validate_model(result.model_path):
+        # 5. Deploy with canary strategy
+        deploy_model(result.model_path, strategy="canary")
+    else:
+        logger.error("New model failed validation")
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Training Failures
+
+**Problem**: Training job fails with OOM error
+
+```
+Error: ResourceExhausted: OOM when allocating tensor
+```
+
+**Solution**:
+```python
+# Reduce batch size
+config.hyperparameters['batch_size'] = 16  # Was 32
+
+# Or increase machine memory
+config.compute_config['machine_type'] = 'n1-highmem-8'  # Was n1-standard-4
+```
+
+#### 2. Deployment Failures
+
+**Problem**: Deployment times out
+
+```
+Error: Deployment timed out after 30 minutes
+```
+
+**Solution**:
+```python
+# Check container size - large containers take longer
+# Use multi-stage Docker builds to reduce size
+
+# Increase timeout in config
+deployment:
+  timeout_minutes: 60  # Increased from 30
+```
+
+#### 3. High Latency
+
+**Problem**: P99 latency > 1000ms
+
+**Diagnosis**:
+```python
+# Analyze latency distribution
+analyzer = ModelPerformanceAnalyzer(tracker)
+report = analyzer.generate_report(endpoint_id, start_time, end_time)
+print(report['metrics_summary']['latency_ms'])
+```
+
+**Solutions**:
+- Scale up replicas for better load distribution
+- Use GPU instances for inference
+- Optimize model (quantization, pruning)
+- Implement caching for frequent predictions
+- Use batch prediction for multiple inputs
+
+#### 4. Drift Detection
+
+**Problem**: Continuous drift alerts
+
+```python
+# Investigate root cause
+drift_results = detector.detect_feature_drift(current_data)
+
+for feature, result in drift_results.items():
+    if result['has_drift']:
+        # Check if drift is legitimate or data quality issue
+        print(f"{feature}: PSI={result['psi']}")
+```
+
+**Solutions**:
+- Verify data pipeline is working correctly
+- Check for seasonality or trends in data
+- Retrain model with recent data
+- Adjust drift threshold if needed
+
+#### 5. Cost Overruns
+
+**Problem**: Cloud bills higher than expected
+
+**Investigation**:
+```bash
+# Check resource utilization
+gcloud monitoring dashboards list
+
+# Review autoscaling behavior
+kubectl get hpa
+
+# Analyze prediction patterns
+python analyze_usage.py --start-date 2025-01-01 --end-date 2025-01-31
+```
+
+**Solutions**:
+- Implement request throttling
+- Use committed use discounts
+- Right-size instances based on actual usage
+- Implement caching
+- Use spot/preemptible instances for non-critical workloads
+
+---
+
+## Advanced Topics
+
+### 1. Multi-Model Endpoints
+
+Deploy multiple models to a single endpoint:
+
+```python
+config = DeploymentConfig(
+    endpoint_name="multi-model-endpoint",
+    models=[
+        {
+            "name": "fraud-detection",
+            "path": "gs://bucket/fraud-model/",
+            "traffic": 80
+        },
+        {
+            "name": "fraud-detection-v2",
+            "path": "gs://bucket/fraud-model-v2/",
+            "traffic": 20
+        }
+    ],
+    machine_type="n1-standard-4",
+    min_replicas=2,
+    max_replicas=10
+)
+```
+
+### 2. Feature Store Integration
+
+```python
+from google.cloud import aiplatform
+
+# Read features from feature store
+feature_store = aiplatform.Featurestore(
+    featurestore_name="projects/123/locations/us-central1/featurestores/my-fs"
+)
+
+features = feature_store.read_feature_values(
+    entity_type="customer",
+    entity_ids=["customer_123"],
+    feature_ids=["age", "income", "credit_score"]
+)
+```
+
+### 3. Model Explainability
+
+```python
+# Configure explainability
+deployment_config = DeploymentConfig(
+    model_path="gs://bucket/model/",
+    endpoint_name="explainable-model",
+    machine_type="n1-standard-4",
+    min_replicas=2,
+    max_replicas=5,
+    explanation_config={
+        "method": "integrated_gradients",
+        "baseline": "zero",
+        "steps": 50
+    }
+)
+```
+
+### 4. Custom Metrics
+
+```python
+class CustomMetricsCollector:
+    def collect_business_metrics(self, predictions):
+        """Collect domain-specific metrics"""
+        return {
+            "false_positive_cost": calculate_fp_cost(predictions),
+            "false_negative_cost": calculate_fn_cost(predictions),
+            "total_business_impact": calculate_impact(predictions)
+        }
+
+# Log custom metrics
+tracker.log_metrics(
+    endpoint_id="endpoint-123",
+    metrics=collector.collect_business_metrics(predictions)
+)
+```
+
+---
+
+## API Reference
+
+### TrainingConfig
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| model_name | str | Yes | Unique model identifier |
+| training_data_path | str | Yes | Path to training data |
+| validation_data_path | str | No | Path to validation data |
+| hyperparameters | Dict | Yes | Model hyperparameters |
+| compute_config | Dict | Yes | Compute resource specification |
+| output_path | str | Yes | Model output location |
+| framework | str | Yes | ML framework (tensorflow, pytorch, sklearn) |
+
+### DeploymentConfig
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| model_path | str | Yes | Path to trained model |
+| endpoint_name | str | Yes | Endpoint identifier |
+| machine_type | str | Yes | Instance type |
+| min_replicas | int | Yes | Minimum number of instances |
+| max_replicas | int | Yes | Maximum number of instances |
+| traffic_split | Dict | No | Traffic distribution across versions |
+
+### MonitoringConfig
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| endpoint_id | str | Yes | Endpoint to monitor |
+| metrics_to_track | List[str] | Yes | Metrics to collect |
+| alert_thresholds | Dict | Yes | Alert threshold values |
+| monitoring_window | str | Yes | Time window (1h, 24h, 7d) |
+
+---
+
+## Contributing
+
+### Development Setup
+
+```bash
+# Clone repository
+git clone https://github.com/your-org/ml-pipeline-framework.git
+cd ml-pipeline-framework
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Install in development mode
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/
+
+# Run linting
+flake8 ml_pipeline_framework/
+black ml_pipeline_framework/
+mypy ml_pipeline_framework/
+```
+
+### Submitting Changes
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
+## License
+
+MIT License - see LICENSE file for details
+
+---
+
+## Support
+
+- **Documentation**: https://docs.ml-pipeline-framework.io
+- **Issues**: https://github.com/your-org/ml-pipeline-framework/issues
+- **Discussions**: https://github.com/your-org/ml-pipeline-framework/discussions
+- **Email**: support@ml-pipeline-framework.io

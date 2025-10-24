@@ -1,0 +1,148 @@
+# ML Monitoring & Utilities Module
+# Reusable components for model monitoring and operations
+
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+import json
+import logging
+
+# ============================================================================
+# 1. MODEL DRIFT DETECTION
+# ============================================================================
+
+class DriftDetector:
+    """Detects data and prediction drift"""
+    
+    def __init__(self, baseline_data: pd.DataFrame):
+        self.baseline_data = baseline_data
+        self.baseline_stats = self._compute_stats(baseline_data)
+        self.logger = logging.getLogger(__name__)
+    
+    def _compute_stats(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Compute statistical properties of data"""
+        stats = {}
+        for col in data.select_dtypes(include=[np.number]).columns:
+            stats[col] = {
+                'mean': data[col].mean(),
+                'std': data[col].std(),
+                'min': data[col].min(),
+                'max': data[col].max(),
+                'quantiles': data[col].quantile([0.25, 0.5, 0.75]).to_dict()
+            }
+        return stats
+    
+    def detect_feature_drift(
+        self, 
+        current_data: pd.DataFrame,
+        threshold: float = 0.1
+    ) -> Dict[str, Any]:
+        """
+        Detect drift in feature distributions using PSI (Population Stability Index)
+        """
+        drift_results = {}
+        current_stats = self._compute_stats(current_data)
+        
+        for feature in self.baseline_stats.keys():
+            if feature not in current_stats:
+                continue
+            
+            # Calculate PSI
+            psi = self._calculate_psi(
+                self.baseline_data[feature],
+                current_data[feature]
+            )
+            
+            drift_results[feature] = {
+                'psi': psi,
+                'has_drift': psi > threshold,
+                'baseline_mean': self.baseline_stats[feature]['mean'],
+                'current_mean': current_stats[feature]['mean'],
+                'mean_shift': abs(current_stats[feature]['mean'] - 
+                                self.baseline_stats[feature]['mean'])
+            }
+        
+        return drift_results
+    
+    def _calculate_psi(
+        self, 
+        baseline: pd.Series, 
+        current: pd.Series, 
+        bins: int = 10
+    ) -> float:
+        """Calculate Population Stability Index"""
+        try:
+            # Create bins based on baseline
+            breakpoints = np.quantile(baseline, np.linspace(0, 1, bins + 1))
+            breakpoints = np.unique(breakpoints)
+            
+            # Count in each bin
+            baseline_counts = np.histogram(baseline, bins=breakpoints)[0]
+            current_counts = np.histogram(current, bins=breakpoints)[0]
+            
+            # Calculate percentages
+            baseline_pct = baseline_counts / len(baseline)
+            current_pct = current_counts / len(current)
+            
+            # Avoid division by zero
+            baseline_pct = np.where(baseline_pct == 0, 0.0001, baseline_pct)
+            current_pct = np.where(current_pct == 0, 0.0001, current_pct)
+            
+            # Calculate PSI
+            psi = np.sum((current_pct - baseline_pct) * 
+                        np.log(current_pct / baseline_pct))
+            
+            return float(psi)
+        except Exception as e:
+            self.logger.error(f"PSI calculation failed: {str(e)}")
+            return 0.0
+    
+    def detect_prediction_drift(
+        self,
+        baseline_predictions: np.ndarray,
+        current_predictions: np.ndarray,
+        threshold: float = 0.1
+    ) -> Dict[str, Any]:
+        """Detect drift in model predictions"""
+        
+        # KL divergence for classification
+        if len(np.unique(baseline_predictions)) < 20:
+            drift_score = self._calculate_kl_divergence(
+                baseline_predictions,
+                current_predictions
+            )
+        else:
+            # PSI for regression or high cardinality
+            drift_score = self._calculate_psi(
+                pd.Series(baseline_predictions),
+                pd.Series(current_predictions)
+            )
+        
+        return {
+            'drift_score': drift_score,
+            'has_drift': drift_score > threshold,
+            'baseline_mean': np.mean(baseline_predictions),
+            'current_mean': np.mean(current_predictions)
+        }
+    
+    def _calculate_kl_divergence(
+        self,
+        p: np.ndarray,
+        q: np.ndarray
+    ) -> float:
+        """Calculate Kullback-Leibler divergence"""
+        from scipy.special import kl_div
+        
+        # Get probability distributions
+        p_dist = np.bincount(p.astype(int)) / len(p)
+        q_dist = np.bincount(q.astype(int)) / len(q)
+        
+        # Ensure same length
+        max_len = max(len(p_dist), len(q_dist))
+        p_dist = np.pad(p_dist, (0, max_len - len(p_dist)))
+        q_dist = np.pad(q_dist, (0, max_len - len(q_dist)))
+        
+        # Avoid zero probabilities
+        p_dist = np.

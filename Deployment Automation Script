@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""
+ML Model Deployment Automation Script
+Orchestrates end-to-end model deployment with validation and rollback
+"""
+
+import argparse
+import yaml
+import sys
+import time
+from pathlib import Path
+from typing import Dict, Any, Optional
+import logging
+
+# Import our custom modules
+from ml_pipeline_framework import (
+    VertexAIProvider, SageMakerProvider, MLPipeline,
+    TrainingConfig, DeploymentConfig, MonitoringConfig
+)
+from ml_monitoring_utils import (
+    MetricsTracker, AlertManager, ModelVersionManager,
+    DriftDetector, DataQualityChecker
+)
+
+# ============================================================================
+# DEPLOYMENT ORCHESTRATOR
+# ============================================================================
+
+class DeploymentOrchestrator:
+    """Orchestrate complete model deployment lifecycle"""
+    
+    def __init__(self, config_path: str):
+        self.config = self._load_config(config_path)
+        self.logger = self._setup_logging()
+        self.provider = self._initialize_provider()
+        self.pipeline = MLPipeline(self.provider)
+        self.version_manager = ModelVersionManager(
+            self.config.get('registry_path', './model_registry')
+        )
+        
+    def _load_config(self, config_path: str) -> Dict[str, Any]:
+        """Load deployment configuration"""
+        with open(config_path, 'r') as f:
+            return yaml.safe_load(f)
+    
+    def _setup_logging(self) -> logging.Logger:
+        """Setup logging configuration"""
+        log_level = self.config.get('logging', {}).get('level', 'INFO')
+        logging.basicConfig(
+            level=getattr(logging, log_level),
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        return logging.getLogger(__name__)
+    
+    def _initialize_provider(self):
+        """Initialize cloud provider based on config"""
+        provider_type = self.config.get('provider', {}).get('type')
+        
+        if provider_type == 'vertex_ai':
+            return VertexAIProvider(
+                project_id=self.config['provider']['project_id'],
+                region=self.config['provider']['region']
+            )
+        elif provider_type == 'sagemaker':
+            return SageMakerProvider(
+                region=self.config['provider']['region'],
+                role_arn=self.config['provider']['role_arn']
+            )
+        else:
+            raise ValueError(f"Unsupported provider: {provider_type}")
+    
+    def deploy(
+        self,
+        model_path: str,
+        version: str,
+        environment: str = 'staging'
+    ) -> Dict[str, Any]:
+        """
+        Deploy model with full validation and monitoring setup
+        """
+        self.logger.info(f"Starting deployment of version {version} to {environment}")
+        
+        deployment_results = {}
+        
+        try:
+            # Step 1: Validate model
+            self.logger.info("Step 1: Validating model...")
+            validation_result = self._validate_model(model_path)
+            if not validation_result['passed']:
+                raise Exception(f"Model validation failed: {validation_result['errors']}")
+            deployment_results['validation'] = validation_result
+            
+            # Step 2: Register model version
+            self.logger.info("Step 2: Registering model version...")
+            self.version_manager.register_model(
+                model_name=self.config['model']['name'],
+                version=version,
+                model_path=model_path,
+                metadata={
+                    'environment': environment,
+                    'validation_results': validation_result
+                }
+            )
+            
+            # Step 3: Deploy to environment
+            self.logger.info(f"Step 3: Deploying to {environment}...")
+            deployment_config = self._create_deployment_config(
+                model_path, environment
+            )
+            deployment_result = self.provider.deploy_model(deployment_config)
+            deployment_results['deployment'] = deployment_result
+            
+            # Step 4: Run smoke tests
+            self.logger.info("Step 4: Running smoke tests...")
+            smoke_test_result = self._run_smoke_tests(
+                deployment_result.endpoint_url
+            )
+            if not smoke_test_result['passed']:
+                self.logger.error("Smoke tests failed, initiating rollback...")
+                self._rollback_deployment(deployment_result.endpoint_id)
+                raise Exception("Smoke tests failed")
+            deployment_results['smoke_tests'] = smoke_test_result
+            
+            # Step 5: Setup monitoring
+            self.logger.info("Step 5: Setting up monitoring...")
+            monitoring_config = self._create_monitoring_config(
+                deployment_result.endpoint_id, environment
+            )
+            monitoring_result = self.provider.monitor_model(monitoring_config)
+            deployment_results['monitoring'] = monitoring_result
+            
+            # Step 6: Gradual traffic shift (if canary deployment)
+            if self.config.get('deployment', {}).get('strategy') == 'canary':
+                self.logger.info("Step 6: Initiating canary deployment...")
+                canary_result = self._canary_deployment(
+                    deployment_result.endpoint_id,
+                    version
+                )
+                deployment_results['canary'] = canary_result
+            
+            # Step 7: Promote to production (if applicable)
+            if environment == 'staging' and self.config.get('auto_promote', False):
+                self.logger.info("Step 7: Auto-promoting to production...")
+                self.version_manager.promote_version(
+                    self.config['model']['name'],
+                    version,
+                    'production'
+                )
+            
+            self.logger.info("Deployment completed successfully!")
+            deployment_results['status'] = 'SUCCESS'
+            
+        except Exception as e:
+            self.logger.error(f"Deployment failed: {str(e)}")
+            deployment_results['status'] = 'FAILED'
+            deployment_results['error'] = str(e)
+            raise
+        
+        return deployment_results
+    
+    def _validate_model(self, model_path: str) -> Dict[str, Any]:
+        """Validate model before deployment"""
+        validation_results = {
+            'passed': True,
+            'errors': [],
+            'warnings': []
+        }
+        
+        # Check if model file exists
+        if not Path(model_path).exists():
+            validation_results['passed'] = False
+            validation_results['errors'].append(f"Model not found: {model_path}")
+            return validation_results
+        
+        # Load and test model
+        try:
+            # TODO: Add actual model loading and testing
+            self.logger.info("Model file exists and is accessible")
+            
+            # Validate against test dataset if provided
+            test_data_path = self.config.get('validation', {}).get('test_data_path')
+            if test_data_path:
+                self.logger.info("Running validation against test dataset...")
+                # TODO: Load test data, run predictions, check metrics
+                pass
+            
+            # Check minimum accuracy threshold
+            min_accuracy = self.config.get('validation', {}).get('min_accuracy')
+            if min_accuracy:
+                # TODO: Compare actual accuracy against threshold
+                pass
+            
+        except Exception as e:
+            validation_results['passed'] = False
+            validation_results['errors'].append(f"Model validation error: {str(e)}")
+        
+        return validation_results
+    
+    def _create_deployment_config(
+        self,
+        model_path: str,
+        environment: str
+    ) -> DeploymentConfig:
+        """Create deployment configuration for environment"""
+        env_config = self.config['environments'][environment]
+        deploy_config = self.config['deployment']
+        
+        return DeploymentConfig(
+            model_path=model_path,
+            endpoint_name=f"{self.config['model']['name']}-{environment}",
+            machine_type=env_config['compute']['machine_type'],
+            min_replicas=env_config['compute']['min_replicas'],
+            max_replicas=env_config['compute']['max_replicas'],
+            environment_variables=deploy_config.get('environment', {})
+        )
+    
+    def _create_monitoring_config(
+        self,
+        endpoint_id: str,
+        environment: str
+    ) -> MonitoringConfig:
+        """Create monitoring configuration"""
+        monitoring_cfg = self.config['monitoring']
+        
+        return MonitoringConfig(
+            endpoint_id=endpoint_id,
+            metrics_to_track=[m['name'] for m in monitoring_cfg['metrics']],
+            alert_thresholds={
+                alert['metric']: alert['threshold']
+                for alert in monitoring_cfg['alerts']
+            },
+            monitoring_window=monitoring_cfg['window']
+        )
+    
+    def _run_smoke_tests(self, endpoint_url: str) -> Dict[str, Any]:
+        """Run smoke tests on deployed endpoint"""
+        smoke_test_results = {
+            'passed': True,
+            'tests': []
+        }
+        
+        test_cases = self.config.get('smoke_tests', {}).get('test_cases', [])
+        
+        for test_case in test_cases:
+            try:
+                # TODO: Send test request to endpoint
+                self.logger.info(f"Running test: {test_case.get('name')}")
+                
+                # Simulate test execution
+                test_result = {
+                    'name': test_case['name'],
+                    'status': 'PASSED',
+                    'latency_ms': 100  # Placeholder
+                }
+                
+                smoke_test_results['tests'].append(test_result)
+                
+            except Exception as e:
+                smoke_test_results['passed'] = False
+                smoke_test_results['tests'].append({
+                    'name': test_case['name'],
+                    'status': 'FAILED',
+                    'error': str(e)
+                })
+        
+        return smoke_test_results
+    
+    def _canary_deployment(
+        self,
+        endpoint_id: str,
+        new_version: str
+    ) -> Dict[str, Any]:
+        """Execute canary deployment with gradual traffic shift"""
+        canary_config = self.config['deployment'].get('canary', {})
+        initial_percentage = canary_config.get('initial_percentage', 10)
+        increment = canary_config.get('increment', 10)
+        duration_per_step = canary_config.get('duration_per_step', 300)  # seconds
+        
+        self.logger.info(f"Starting canary at {initial_percentage}% traffic")
+        
+        current_percentage = initial_percentage
+        canary_results = []
+        
+        while current_percentage <= 100:
+            self.logger.info(f"Shifting {current_percentage}% traffic to new version")
+            
+            # Update traffic split
+            # TODO: Call provider API to update traffic split
+            
+            # Monitor for duration
+            self.logger.info(f"Monitoring for {duration_per_step}s...")
+            time.sleep(duration_per_step)
+            
+            # Check metrics
+            metrics = self._check_canary_metrics(endpoint_id)
+            canary_results.append({
+                'percentage': current_percentage,
+                'metrics': metrics,
+                'timestamp': time.time()
+            })
+            
+            # Decide if we should continue or rollback
+            if not self._canary_health_check(metrics):
+                self.logger.error("Canary health check failed, rolling back...")
+                self._rollback_deployment(endpoint_id)
+                return {
+                    'status': 'ROLLED_BACK',
+                    'results': canary_results
+                }
+            
+            current_percentage += increment
+        
+        return {
+            'status': 'COMPLETED',
+            'results': canary_results
+        }
+    
+    def _check_canary_metrics(self, endpoint_id: str) -> Dict[str, float]:
+        """Check metrics during canary deployment"""
+        # TODO: Query actual metrics from monitoring system
+        return {
+            'error_rate': 0.01,
+            'latency_p99': 500,
+            'cpu_usage': 45
+        }
+    
+    def _canary_health_check(self, metrics: Dict[str, float]) -> bool:
+        """Check if canary deployment is healthy"""
+        thresholds = self.config.get('deployment', {}).get('canary', {}).get('thresholds', {})
+        
+        for metric

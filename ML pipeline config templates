@@ -1,0 +1,318 @@
+# ============================================================================
+# CONFIGURATION TEMPLATES FOR ML PIPELINES
+# ============================================================================
+
+# ============================================================================
+# 1. TRAINING CONFIGURATION TEMPLATE
+# ============================================================================
+training:
+  model_name: "my-model-v1"
+  
+  # Data paths (adjust based on cloud provider)
+  data:
+    training_path: "gs://bucket/data/train.csv"  # GCS for Vertex AI
+    # training_path: "s3://bucket/data/train.csv"  # S3 for SageMaker
+    validation_path: "gs://bucket/data/val.csv"
+    test_path: "gs://bucket/data/test.csv"
+  
+  # Framework selection
+  framework: "tensorflow"  # tensorflow, pytorch, sklearn, xgboost
+  
+  # Hyperparameters
+  hyperparameters:
+    learning_rate: 0.001
+    epochs: 50
+    batch_size: 32
+    optimizer: "adam"
+    dropout_rate: 0.2
+    hidden_layers: [128, 64, 32]
+  
+  # Compute configuration
+  compute:
+    # Vertex AI
+    machine_type: "n1-standard-4"
+    accelerator_type: null  # "NVIDIA_TESLA_T4"
+    accelerator_count: 0
+    replica_count: 1
+    
+    # AWS SageMaker equivalent
+    # instance_type: "ml.m5.xlarge"
+    # instance_count: 1
+  
+  # Output configuration
+  output:
+    model_path: "gs://bucket/models/"
+    checkpoint_path: "gs://bucket/checkpoints/"
+    logs_path: "gs://bucket/logs/"
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 5
+    metric: "val_loss"
+    mode: "min"
+  
+  # Custom training script (optional)
+  custom_script:
+    path: "train.py"
+    entry_point: "main"
+    requirements: "requirements.txt"
+
+# ============================================================================
+# 2. DEPLOYMENT CONFIGURATION TEMPLATE
+# ============================================================================
+deployment:
+  endpoint_name: "my-model-endpoint"
+  model_version: "v1"
+  
+  # Infrastructure
+  infrastructure:
+    # Vertex AI
+    machine_type: "n1-standard-2"
+    accelerator_type: null
+    min_replicas: 1
+    max_replicas: 5
+    
+    # AWS SageMaker equivalent
+    # instance_type: "ml.m5.large"
+    # initial_instance_count: 1
+  
+  # Auto-scaling
+  autoscaling:
+    enabled: true
+    target_cpu_utilization: 60
+    target_memory_utilization: 70
+    scale_in_cooldown: 300
+    scale_out_cooldown: 60
+  
+  # Traffic management
+  traffic:
+    strategy: "blue-green"  # blue-green, canary, rolling
+    canary_percentage: 10
+    rollout_duration: "1h"
+  
+  # Model configuration
+  model:
+    path: "gs://bucket/models/my-model/"
+    framework: "tensorflow"
+    serving_container: "gcr.io/cloud-aiplatform/prediction/tf2-cpu.2-12:latest"
+    
+  # Environment variables
+  environment:
+    MODEL_NAME: "my-model"
+    LOG_LEVEL: "INFO"
+    BATCH_SIZE: "32"
+  
+  # Health checks
+  health_check:
+    enabled: true
+    path: "/health"
+    interval: "30s"
+    timeout: "5s"
+    healthy_threshold: 2
+    unhealthy_threshold: 3
+
+# ============================================================================
+# 3. MONITORING CONFIGURATION TEMPLATE
+# ============================================================================
+monitoring:
+  endpoint_id: "projects/123/endpoints/456"
+  
+  # Metrics to track
+  metrics:
+    # Performance metrics
+    - name: "prediction_latency"
+      type: "gauge"
+      unit: "ms"
+      aggregation: "p99"
+    
+    - name: "predictions_per_second"
+      type: "counter"
+      unit: "requests/sec"
+      aggregation: "rate"
+    
+    - name: "error_rate"
+      type: "gauge"
+      unit: "percentage"
+      aggregation: "avg"
+    
+    # Resource metrics
+    - name: "cpu_utilization"
+      type: "gauge"
+      unit: "percentage"
+      aggregation: "avg"
+    
+    - name: "memory_utilization"
+      type: "gauge"
+      unit: "percentage"
+      aggregation: "avg"
+    
+    # Model-specific metrics
+    - name: "prediction_drift"
+      type: "gauge"
+      unit: "score"
+      aggregation: "avg"
+    
+    - name: "feature_drift"
+      type: "gauge"
+      unit: "score"
+      aggregation: "avg"
+  
+  # Alert thresholds
+  alerts:
+    - name: "high_latency"
+      metric: "prediction_latency"
+      condition: ">"
+      threshold: 1000
+      duration: "5m"
+      severity: "warning"
+      channels: ["email", "slack"]
+    
+    - name: "high_error_rate"
+      metric: "error_rate"
+      condition: ">"
+      threshold: 0.05
+      duration: "5m"
+      severity: "critical"
+      channels: ["email", "slack", "pagerduty"]
+    
+    - name: "model_drift"
+      metric: "prediction_drift"
+      condition: ">"
+      threshold: 0.3
+      duration: "1h"
+      severity: "warning"
+      channels: ["email"]
+  
+  # Monitoring window
+  window: "1h"
+  retention_days: 30
+  
+  # Logging
+  logging:
+    enabled: true
+    sample_rate: 0.1  # Log 10% of predictions
+    include_features: true
+    include_predictions: true
+  
+  # Data quality monitoring
+  data_quality:
+    enabled: true
+    schema_validation: true
+    range_checks: true
+    null_checks: true
+    drift_detection:
+      enabled: true
+      baseline_window: "7d"
+      detection_window: "1d"
+
+# ============================================================================
+# 4. MULTI-ENVIRONMENT CONFIGURATION
+# ============================================================================
+environments:
+  dev:
+    project_id: "my-project-dev"
+    region: "us-central1"
+    compute:
+      machine_type: "n1-standard-2"
+      min_replicas: 1
+      max_replicas: 2
+    monitoring:
+      alert_enabled: false
+  
+  staging:
+    project_id: "my-project-staging"
+    region: "us-central1"
+    compute:
+      machine_type: "n1-standard-4"
+      min_replicas: 1
+      max_replicas: 3
+    monitoring:
+      alert_enabled: true
+      alert_channels: ["email"]
+  
+  production:
+    project_id: "my-project-prod"
+    region: "us-central1"
+    compute:
+      machine_type: "n1-highmem-4"
+      min_replicas: 3
+      max_replicas: 10
+    monitoring:
+      alert_enabled: true
+      alert_channels: ["email", "slack", "pagerduty"]
+
+# ============================================================================
+# 5. PROVIDER-SPECIFIC CONFIGURATIONS
+# ============================================================================
+
+# Vertex AI specific
+vertex_ai:
+  project_id: "my-gcp-project"
+  region: "us-central1"
+  service_account: "vertex-sa@my-project.iam.gserviceaccount.com"
+  network: "projects/my-project/global/networks/default"
+  encryption_spec:
+    kms_key_name: "projects/my-project/locations/us/keyRings/my-keyring/cryptoKeys/my-key"
+
+# AWS SageMaker specific
+sagemaker:
+  region: "us-east-1"
+  role_arn: "arn:aws:iam::123456789012:role/SageMakerRole"
+  vpc_config:
+    subnets: ["subnet-12345", "subnet-67890"]
+    security_group_ids: ["sg-12345"]
+  kms_key_id: "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+
+# Azure ML specific
+azure_ml:
+  subscription_id: "12345678-1234-1234-1234-123456789012"
+  resource_group: "my-ml-rg"
+  workspace_name: "my-ml-workspace"
+  region: "eastus"
+
+# ============================================================================
+# 6. EXPERIMENT TRACKING CONFIGURATION
+# ============================================================================
+experiment_tracking:
+  enabled: true
+  backend: "mlflow"  # mlflow, wandb, tensorboard
+  
+  mlflow:
+    tracking_uri: "gs://bucket/mlflow"
+    experiment_name: "my-model-experiments"
+    artifact_location: "gs://bucket/artifacts"
+  
+  # Metadata to track
+  track:
+    - hyperparameters
+    - metrics
+    - artifacts
+    - code_version
+    - dataset_version
+    - model_signature
+
+# ============================================================================
+# 7. CI/CD PIPELINE CONFIGURATION
+# ============================================================================
+cicd:
+  # Model validation gates
+  validation:
+    min_accuracy: 0.85
+    max_latency_ms: 500
+    min_test_coverage: 0.8
+  
+  # Deployment strategy
+  deployment:
+    approval_required: true
+    approvers: ["ml-team@company.com"]
+    canary_enabled: true
+    rollback_on_error: true
+  
+  # Testing stages
+  testing:
+    unit_tests: true
+    integration_tests: true
+    performance_tests: true
+    shadow_deployment: true
+    a_b_testing: true

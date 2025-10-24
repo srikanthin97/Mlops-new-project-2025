@@ -1,0 +1,433 @@
+# ML Pipeline Framework - Reusable Modules
+# For model training, deployment, and monitoring across cloud platforms
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, List
+import json
+import logging
+from datetime import datetime
+
+# ============================================================================
+# 1. BASE ABSTRACTIONS
+# ============================================================================
+
+class CloudProvider(ABC):
+    """Abstract base class for cloud provider implementations"""
+    
+    @abstractmethod
+    def train_model(self, config: 'TrainingConfig') -> 'TrainingResult':
+        pass
+    
+    @abstractmethod
+    def deploy_model(self, config: 'DeploymentConfig') -> 'DeploymentResult':
+        pass
+    
+    @abstractmethod
+    def monitor_model(self, config: 'MonitoringConfig') -> 'MonitoringResult':
+        pass
+
+
+@dataclass
+class TrainingConfig:
+    """Configuration for model training"""
+    model_name: str
+    training_data_path: str
+    validation_data_path: Optional[str]
+    hyperparameters: Dict[str, Any]
+    compute_config: Dict[str, Any]
+    output_path: str
+    framework: str  # 'tensorflow', 'pytorch', 'sklearn', etc.
+    custom_commands: Optional[List[str]] = None
+
+
+@dataclass
+class TrainingResult:
+    """Results from model training"""
+    model_id: str
+    model_path: str
+    metrics: Dict[str, float]
+    training_duration: float
+    status: str
+    logs_path: Optional[str] = None
+
+
+@dataclass
+class DeploymentConfig:
+    """Configuration for model deployment"""
+    model_path: str
+    endpoint_name: str
+    machine_type: str
+    min_replicas: int
+    max_replicas: int
+    traffic_split: Optional[Dict[str, int]] = None
+    environment_variables: Optional[Dict[str, str]] = None
+
+
+@dataclass
+class DeploymentResult:
+    """Results from model deployment"""
+    endpoint_id: str
+    endpoint_url: str
+    status: str
+    deployed_at: datetime
+
+
+@dataclass
+class MonitoringConfig:
+    """Configuration for model monitoring"""
+    endpoint_id: str
+    metrics_to_track: List[str]
+    alert_thresholds: Dict[str, float]
+    monitoring_window: str  # '1h', '24h', '7d', etc.
+
+
+@dataclass
+class MonitoringResult:
+    """Results from model monitoring"""
+    metrics: Dict[str, float]
+    alerts: List[Dict[str, Any]]
+    health_status: str
+
+
+# ============================================================================
+# 2. VERTEX AI IMPLEMENTATION
+# ============================================================================
+
+class VertexAIProvider(CloudProvider):
+    """Google Cloud Vertex AI implementation"""
+    
+    def __init__(self, project_id: str, region: str, credentials_path: Optional[str] = None):
+        self.project_id = project_id
+        self.region = region
+        self.credentials_path = credentials_path
+        self.logger = logging.getLogger(__name__)
+    
+    def train_model(self, config: TrainingConfig) -> TrainingResult:
+        """
+        Train model on Vertex AI
+        Uses CustomJob or AutoML depending on configuration
+        """
+        try:
+            # Initialize Vertex AI
+            from google.cloud import aiplatform
+            
+            aiplatform.init(
+                project=self.project_id,
+                location=self.region
+            )
+            
+            # Create custom training job
+            job = aiplatform.CustomJob.from_local_script(
+                display_name=config.model_name,
+                script_path="train.py",  # Your training script
+                container_uri=self._get_container_uri(config.framework),
+                requirements=["google-cloud-aiplatform"],
+                replica_count=config.compute_config.get('replica_count', 1),
+                machine_type=config.compute_config.get('machine_type', 'n1-standard-4'),
+                args=[
+                    f"--data-path={config.training_data_path}",
+                    f"--output-path={config.output_path}",
+                    f"--params={json.dumps(config.hyperparameters)}"
+                ]
+            )
+            
+            # Run training
+            self.logger.info(f"Starting training job: {config.model_name}")
+            model = job.run(sync=True)
+            
+            return TrainingResult(
+                model_id=model.resource_name,
+                model_path=config.output_path,
+                metrics=self._extract_metrics(model),
+                training_duration=0.0,  # Calculate from job stats
+                status="SUCCESS",
+                logs_path=f"gs://{self.project_id}-logs/training/"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Training failed: {str(e)}")
+            raise
+    
+    def deploy_model(self, config: DeploymentConfig) -> DeploymentResult:
+        """Deploy model to Vertex AI Endpoint"""
+        try:
+            from google.cloud import aiplatform
+            
+            aiplatform.init(project=self.project_id, location=self.region)
+            
+            # Upload model if needed
+            model = aiplatform.Model.upload(
+                display_name=config.endpoint_name,
+                artifact_uri=config.model_path,
+                serving_container_image_uri=self._get_serving_container()
+            )
+            
+            # Create or get endpoint
+            endpoint = aiplatform.Endpoint.create(
+                display_name=config.endpoint_name
+            )
+            
+            # Deploy model to endpoint
+            model.deploy(
+                endpoint=endpoint,
+                machine_type=config.machine_type,
+                min_replica_count=config.min_replicas,
+                max_replica_count=config.max_replicas,
+                traffic_split=config.traffic_split or {"0": 100}
+            )
+            
+            return DeploymentResult(
+                endpoint_id=endpoint.resource_name,
+                endpoint_url=endpoint.resource_name,
+                status="DEPLOYED",
+                deployed_at=datetime.now()
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Deployment failed: {str(e)}")
+            raise
+    
+    def monitor_model(self, config: MonitoringConfig) -> MonitoringResult:
+        """Monitor deployed model on Vertex AI"""
+        try:
+            from google.cloud import monitoring_v3
+            
+            client = monitoring_v3.MetricServiceClient()
+            project_name = f"projects/{self.project_id}"
+            
+            metrics = {}
+            alerts = []
+            
+            # Query metrics
+            for metric_name in config.metrics_to_track:
+                metric_value = self._query_metric(
+                    client, project_name, metric_name, config.monitoring_window
+                )
+                metrics[metric_name] = metric_value
+                
+                # Check thresholds
+                if metric_name in config.alert_thresholds:
+                    threshold = config.alert_thresholds[metric_name]
+                    if metric_value > threshold:
+                        alerts.append({
+                            'metric': metric_name,
+                            'value': metric_value,
+                            'threshold': threshold,
+                            'timestamp': datetime.now()
+                        })
+            
+            health_status = "HEALTHY" if not alerts else "DEGRADED"
+            
+            return MonitoringResult(
+                metrics=metrics,
+                alerts=alerts,
+                health_status=health_status
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Monitoring failed: {str(e)}")
+            raise
+    
+    def _get_container_uri(self, framework: str) -> str:
+        """Get pre-built training container URI"""
+        containers = {
+            'tensorflow': 'gcr.io/cloud-aiplatform/training/tf-cpu.2-12:latest',
+            'pytorch': 'gcr.io/cloud-aiplatform/training/pytorch-cpu.1-13:latest',
+            'sklearn': 'gcr.io/cloud-aiplatform/training/scikit-learn-cpu.1-0:latest'
+        }
+        return containers.get(framework, containers['sklearn'])
+    
+    def _get_serving_container(self) -> str:
+        return 'gcr.io/cloud-aiplatform/prediction/tf2-cpu.2-12:latest'
+    
+    def _extract_metrics(self, model) -> Dict[str, float]:
+        """Extract training metrics from model"""
+        return {'accuracy': 0.95, 'loss': 0.05}  # Placeholder
+    
+    def _query_metric(self, client, project_name: str, metric: str, window: str) -> float:
+        """Query Cloud Monitoring for metrics"""
+        return 0.0  # Placeholder - implement actual query
+
+
+# ============================================================================
+# 3. AWS SAGEMAKER IMPLEMENTATION
+# ============================================================================
+
+class SageMakerProvider(CloudProvider):
+    """AWS SageMaker implementation"""
+    
+    def __init__(self, region: str, role_arn: str):
+        self.region = region
+        self.role_arn = role_arn
+        self.logger = logging.getLogger(__name__)
+    
+    def train_model(self, config: TrainingConfig) -> TrainingResult:
+        """Train model on SageMaker"""
+        try:
+            import boto3
+            import sagemaker
+            from sagemaker.estimator import Estimator
+            
+            session = sagemaker.Session(boto_session=boto3.Session(region_name=self.region))
+            
+            estimator = Estimator(
+                image_uri=self._get_container_uri(config.framework),
+                role=self.role_arn,
+                instance_count=config.compute_config.get('instance_count', 1),
+                instance_type=config.compute_config.get('instance_type', 'ml.m5.xlarge'),
+                output_path=config.output_path,
+                sagemaker_session=session,
+                hyperparameters=config.hyperparameters
+            )
+            
+            estimator.fit({'training': config.training_data_path})
+            
+            return TrainingResult(
+                model_id=estimator.latest_training_job.name,
+                model_path=estimator.model_data,
+                metrics={'accuracy': 0.95},  # Extract from training job
+                training_duration=0.0,
+                status="SUCCESS"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"SageMaker training failed: {str(e)}")
+            raise
+    
+    def deploy_model(self, config: DeploymentConfig) -> DeploymentResult:
+        """Deploy model to SageMaker endpoint"""
+        # Implementation similar to Vertex AI
+        pass
+    
+    def monitor_model(self, config: MonitoringConfig) -> MonitoringResult:
+        """Monitor SageMaker endpoint"""
+        # Implementation using CloudWatch
+        pass
+    
+    def _get_container_uri(self, framework: str) -> str:
+        """Get SageMaker container URI"""
+        return f"763104351884.dkr.ecr.{self.region}.amazonaws.com/{framework}-training:latest"
+
+
+# ============================================================================
+# 4. PIPELINE ORCHESTRATOR
+# ============================================================================
+
+class MLPipeline:
+    """High-level orchestrator for ML workflows"""
+    
+    def __init__(self, provider: CloudProvider):
+        self.provider = provider
+        self.logger = logging.getLogger(__name__)
+    
+    def run_training_pipeline(
+        self,
+        config: TrainingConfig,
+        auto_deploy: bool = False,
+        deployment_config: Optional[DeploymentConfig] = None
+    ) -> Dict[str, Any]:
+        """Run complete training pipeline"""
+        
+        results = {}
+        
+        # Step 1: Train model
+        self.logger.info("Starting model training...")
+        training_result = self.provider.train_model(config)
+        results['training'] = training_result
+        
+        # Step 2: Auto-deploy if configured
+        if auto_deploy and deployment_config:
+            self.logger.info("Auto-deploying trained model...")
+            deployment_config.model_path = training_result.model_path
+            deployment_result = self.provider.deploy_model(deployment_config)
+            results['deployment'] = deployment_result
+        
+        return results
+    
+    def run_deployment_pipeline(
+        self,
+        config: DeploymentConfig,
+        enable_monitoring: bool = True,
+        monitoring_config: Optional[MonitoringConfig] = None
+    ) -> Dict[str, Any]:
+        """Run deployment pipeline with optional monitoring"""
+        
+        results = {}
+        
+        # Deploy model
+        self.logger.info("Deploying model...")
+        deployment_result = self.provider.deploy_model(config)
+        results['deployment'] = deployment_result
+        
+        # Setup monitoring
+        if enable_monitoring and monitoring_config:
+            monitoring_config.endpoint_id = deployment_result.endpoint_id
+            self.logger.info("Setting up monitoring...")
+            # Initial monitoring check
+            monitoring_result = self.provider.monitor_model(monitoring_config)
+            results['monitoring'] = monitoring_result
+        
+        return results
+
+
+# ============================================================================
+# 5. USAGE EXAMPLE
+# ============================================================================
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO)
+    
+    # Initialize provider
+    vertex_provider = VertexAIProvider(
+        project_id="my-gcp-project",
+        region="us-central1"
+    )
+    
+    # Create pipeline
+    pipeline = MLPipeline(provider=vertex_provider)
+    
+    # Configure training
+    training_config = TrainingConfig(
+        model_name="fraud-detection-model",
+        training_data_path="gs://my-bucket/data/train.csv",
+        validation_data_path="gs://my-bucket/data/val.csv",
+        hyperparameters={
+            "learning_rate": 0.001,
+            "epochs": 50,
+            "batch_size": 32
+        },
+        compute_config={
+            "machine_type": "n1-standard-4",
+            "replica_count": 1
+        },
+        output_path="gs://my-bucket/models/",
+        framework="tensorflow"
+    )
+    
+    # Configure deployment
+    deployment_config = DeploymentConfig(
+        model_path="",  # Will be set by pipeline
+        endpoint_name="fraud-detection-endpoint",
+        machine_type="n1-standard-2",
+        min_replicas=1,
+        max_replicas=3
+    )
+    
+    # Configure monitoring
+    monitoring_config = MonitoringConfig(
+        endpoint_id="",  # Will be set by pipeline
+        metrics_to_track=["latency", "error_rate", "cpu_usage"],
+        alert_thresholds={"latency": 1000, "error_rate": 0.05},
+        monitoring_window="1h"
+    )
+    
+    # Run complete pipeline
+    results = pipeline.run_training_pipeline(
+        config=training_config,
+        auto_deploy=True,
+        deployment_config=deployment_config
+    )
+    
+    print(f"Pipeline completed: {results}")
